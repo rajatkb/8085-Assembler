@@ -1,0 +1,6 @@
+NOP;
+ADD B;
+MOV B,C;
+STA 3000H;
+MVI A,30H;
+ADI 30H;
