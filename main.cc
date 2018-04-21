@@ -41,17 +41,10 @@
 
 	LABEL=> [_,a-Z][-,a-Z,0-9]*
 */
-
+//////////////////////////////////////////////// BASIC DATA STRUCTURES TO HOLD THE INSTRUCTION DATA ///////////////////////////
 #define BINARY_WORD_SIZE 8
 
 enum TOKEN_CLASS { ID0 , ID1 , DATA , ADDR , LABEL  , REGISTER='R' , COLON=':' , COMMA=',' , EOL=';' , SPACE=' ' , UKN=-1};
-
-struct 	token
-{
-	TOKEN_CLASS tc;
-	std::string value;
-	int line_no;
-};
 
 struct  keyword
 {
@@ -62,6 +55,7 @@ struct  keyword
 #define MOV_MAP 0xF1
 #define ADD_MAP 0xF2
 #define MVI_MAP 0xF3
+#define JMP_MAP 0xFF
 
 std::array<keyword , 4> ID0_LIST = {{
 	{"NOP" ,  0x00},
@@ -70,10 +64,11 @@ std::array<keyword , 4> ID0_LIST = {{
 	{"ADD" , ADD_MAP}
 }};
 
-std::array<keyword , 3> ID1_LIST = {{
+std::array<keyword , 4> ID1_LIST = {{
 	{"MVI",  MVI_MAP},
 	{"STA" , 0x32},
-	{"ADI" , 0xC6}
+	{"ADI" , 0xC6},
+	{"JMP" , JMP_MAP}
 }};
 
 std::array<std::array<unsigned char,8>,8> MOV_TABLE={{
@@ -115,7 +110,10 @@ int get_register_pos(char reg)
 		exit(0);
 	}
 }
+////////////////////////////////////////////////// /////////////////////////////////////////////////////////////////
 
+
+///////////////////////////////////////////////// buffer builder for the file //////////////////////////////////////
 typedef std::vector<char> buffer;
 buffer readfile(char *filename)
 {
@@ -135,7 +133,16 @@ buffer readfile(char *filename)
 		std::cout<<"err: No such file exist"<<std::endl;
 	exit(1);
 }
+////////////////////////////////////////////////// bufer builder ends here /////////////////////////////////////////
 
+
+///////////////////////////////////////////////// lexer startes here ///////////////////////////////////////////////
+struct 	token
+{
+	TOKEN_CLASS tc;
+	std::string value;
+	int line_no;
+};
 
 bool is_legal_label(std::string lexem)
 {
@@ -232,8 +239,7 @@ symbol_table lex_analyse_source(buffer b)
 	symbol_table TOKENISED_SOURCE;
 	char ch=' ';
 	std::string lexem="";
-	int line_no=0;
-	int mem_loc=0;
+	int line_no=1;
 
 	for(int i = 0; i < b.size() ; i++)
 	{
@@ -312,26 +318,34 @@ symbol_table lex_analyse_source(buffer b)
 		}
 		lexem+=ch;
 	}
-	printTokens(TOKENISED_SOURCE);
+	// printTokens(TOKENISED_SOURCE);
 	return TOKENISED_SOURCE;
 }
+/////////////////////////////////////////////////// lexer ends here /////////////////////////////////////////////////////
 
-
-/*==========================PARSER FOR THE SYMBOL TABLE============================*/
-
+/*=============================================PARSER FOR THE SYMBOL TABLE=============================================*/
+struct LABEL_TABLE_ENTRY
+{
+	std::string LABEL_NAME;
+	int mem_loc; 
+	bool resolve; // true => the JMP statement will look for those whose resolve is true i.e needs resolving.
+};
+typedef std::vector<LABEL_TABLE_ENTRY> label_table; 
+typedef std::vector<std::string> binarySource;
 /*===========UTILITY STUFF FOR PRINTINTS AND STUFF*=========================*/
 
-void print_vector_of_string(std::vector<std::string> &li , int start_point)
+void print_binary_source(binarySource &li)
 {
 	std::cout<<std::endl;
 	for(int i=0 ; i < li.size() ; i++)
 	{
-		std::cout<<start_point+i<<": "<<li[i]<<std::endl;
+		std::cout<<i<<" : "<<li[i]<<std::endl;
 	}
 }
 
 /*==========================================================================*/
 
+// gets the code from the binary code tables based on which class of ID it is 
 unsigned char getCode(std::string operation , TOKEN_CLASS tc)
 {
 	if(tc == ID0)
@@ -350,7 +364,8 @@ unsigned char getCode(std::string operation , TOKEN_CLASS tc)
 	exit(0);
 }
 
-typedef std::vector<std::string> binarySource;
+
+
 binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 {
 	/*
@@ -359,13 +374,8 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 		ID1: ADDR; | R,D; | D; | LABEL;
 	*/
 
-		struct LABEL_TABLE_ENTRY
-	{
-		std::string LABEL_NAME;
-		int mem_loc; 
-	};
-
-	std::vector<LABEL_TABLE_ENTRY> LABEL_TABLE;
+	
+	label_table LABEL_TABLE;
 	binarySource TRANSLATED_SOURCE;
 
 	int state=0;
@@ -382,22 +392,34 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 					state=1;
 				else if(symt[i].tc == LABEL)
 				{
-					// bool found=false;
-					// // see whether the label exist in the list already or not
-					// for(int i=0 ; i < LABEL_TABLE.size() ; i++)
-					// {
-					// 	if(LABEL_TABLE[i].LABEL_NAME == symt[i].value)
-					// 	{
-					// 		unsigned short sp= stoi(start_point , nullptr , 16);
-					// 		TRANSLATED_SOURCE[LABEL_TABLE[i].mem_loc] = std::bitset<BINARY_WORD_SIZE>(mem_loc+start_point).to_string();
-					// 		TRANSLATED_SOURCE.erase(TRANSLATED_SOURCE.begin()+i);
-					// 		found = true;
-					// 		break;
-					// 	}
-					// }
-
-					// if(!found)
-					// 	LABEL_TABLE.push_back({symt[i].value , mem_loc});
+					bool found=false; // is the label already existing in the label_table
+					for(int k=0 ; k < LABEL_TABLE.size() ; k++) // iterate over the label table
+					{
+						if(LABEL_TABLE[k].LABEL_NAME == symt[i].value) // if the label is found
+						{
+							if(LABEL_TABLE[k].resolve == false) // was this label entered by a start synbol i.e by rule LABEL: ID0|ID1
+							{
+								std::cout<<"err: reuse of label "<<symt[i].value<<" for denoting jump position at line "<<symt[i].line_no<<std::endl;
+								exit(1); // if yes then exit since the label is getting used
+							}
+							// else resolve the label location in the jump statement
+							unsigned short sp= stoi(start_point , nullptr , 16); // converting 0x8000 to decimal integer
+							std::string addr = std::bitset<2*BINARY_WORD_SIZE>(sp + mem_loc).to_string();
+							// entering current location + start point in the the JMP location that created the label table entry
+							TRANSLATED_SOURCE[LABEL_TABLE[k].mem_loc+1] = addr.substr(BINARY_WORD_SIZE,BINARY_WORD_SIZE);
+							TRANSLATED_SOURCE[LABEL_TABLE[k].mem_loc+2] = addr.substr(0,BINARY_WORD_SIZE);
+							// it is resolved hence delete the entry and decrement the counter
+							// LABEL_TABLE.erase(LABEL_TABLE.begin()+k);
+							// k--;
+							found = true;
+						}
+					}
+					// if not found then the following steps to be taken
+					if(!found)
+					{	// not found i.e new label entry to be created for resolving by JMP statement
+						LABEL_TABLE.push_back({symt[i].value , mem_loc , false});
+					}
+					state=1;
 				}
 				else
 				{
@@ -421,6 +443,10 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 					state=3;
 				else if(symt[i].tc == DATA) // ID1 DATA => S6
 					state=6;
+				else if(symt[i].tc == LABEL) // ID1 LABEL => S7
+					state =7;
+				else if(symt[i].tc == COLON) // LABEL COLON => RESET
+					state = 0;
 				else
 				{
 					std::cout<<std::endl<<"err: cannot parse the line "<<symt[i].line_no<<std::endl;
@@ -466,15 +492,14 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 					unsigned char oppcode = (getCode(symt[look_back].value , symt[look_back].tc));
 					TRANSLATED_SOURCE.push_back(std::bitset<BINARY_WORD_SIZE>(oppcode).to_string());
 					look_back++;
-					std::string t = symt[look_back].value.substr(2,2); // this is a problem i have no ide why it is there
+					 // this is a problem i have no ide why it is there
 					// if we put statement ot t in directly in stoi then it gives out of bounds exception but why ?????
 					// OPEN BUG 
-					oppcode = std::stoi(symt[look_back].value.substr(0,2), nullptr , 16); // address arguements
+					std::string lower_bit = symt[look_back].value.substr(2,2);
+					oppcode = std::stoi(lower_bit, nullptr , 16); // lower bit address arguements
 					TRANSLATED_SOURCE.push_back(std::bitset<BINARY_WORD_SIZE>(oppcode).to_string());
-					look_back++;
-					oppcode = std::stoi(t, nullptr , 16); // address arguements
+					oppcode = std::stoi(symt[look_back].value.substr(0,2), nullptr , 16);// higher bit address arguements
 					TRANSLATED_SOURCE.push_back(std::bitset<BINARY_WORD_SIZE>(oppcode).to_string());
-					
 					state=0;
 
 				}
@@ -501,7 +526,7 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 					}
 					else
 					{
-						std::cout<<std::endl<<"err: the given operation "<<symt[look_back].value<<"at line "<<symt[look_back].line_no<<" with two register operands is part of architecture but does not have a table for hex code"<<std::endl;
+						std::cout<<std::endl<<"err: the given operation "<<symt[look_back].value<<" at line "<<symt[look_back].line_no<<" with two register operands is not part of architecture or does not have its opcode table specified"<<std::endl;
 						exit(0);
 					}
 
@@ -531,7 +556,7 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 					}
 					else
 					{
-						std::cout<<std::endl<<"err: the given operation "<<symt[look_back].value<<"at line "<<symt[look_back].line_no<<" with one register and data operand is part of architecture but does not have a table for hex code"<<std::endl;
+						std::cout<<std::endl<<"err: the given operation "<<symt[look_back].value<<" at line "<<symt[look_back].line_no<<" with one register and data operand is not part of architecture or does not have its opcode table specified"<<std::endl;
 						exit(0);
 					}
 					TRANSLATED_SOURCE.push_back(std::bitset<BINARY_WORD_SIZE>(oppcode).to_string());
@@ -567,13 +592,77 @@ binarySource parse_symbol_table(symbol_table symt , std::string start_point)
 				break;
 			}
 
+			case 7 :{
+				if(symt[i].tc == EOL) // ID1 LABEL SEMICOLON => RESET
+				{
+					look_back = i-2; // number of state passed
+					unsigned char oppcode = (getCode(symt[look_back].value , symt[look_back].tc));
+					TRANSLATED_SOURCE.push_back(std::bitset<BINARY_WORD_SIZE>(oppcode).to_string());
+					bool found=false;
+					// see whether the label exist in the list already or not
+					for(int k=0 ; k < LABEL_TABLE.size() ; k++)
+					{
+						if(LABEL_TABLE[k].resolve==false && LABEL_TABLE[k].LABEL_NAME == symt[look_back+1].value)
+						{
+							unsigned short sp= stoi(start_point , nullptr , 16); // converting 0x8000 to decimal integer
+							std::string addr = std::bitset<2*BINARY_WORD_SIZE>(sp + LABEL_TABLE[k].mem_loc).to_string();
+							TRANSLATED_SOURCE.push_back(addr.substr(BINARY_WORD_SIZE,BINARY_WORD_SIZE));
+							TRANSLATED_SOURCE.push_back(addr.substr(0,BINARY_WORD_SIZE));
+							found = true;
+							break;
+						}
+					}
+					if(!found)
+					{
+						TRANSLATED_SOURCE.push_back("");
+						TRANSLATED_SOURCE.push_back("");
+						LABEL_TABLE.push_back({symt[look_back+1].value , mem_loc , true});
+					}
+					state=0;
+				}
+				else
+				{
+					std::cout<<std::endl<<"err: cannot parse the line "<<symt[i].line_no<<std::endl;
+					exit(0);
+				}
+				break;
+			}
+
 		}
+	}
+
+
+	for(int k=0 ; k < TRANSLATED_SOURCE.size() ; k++)
+	{
+		if(TRANSLATED_SOURCE[k] == "")
+		{
+			std::cout<<"err: possible unresolved labels";
+			exit(1);
+		}		
 	}
 
 	return TRANSLATED_SOURCE;
 }
 
+/////////////////////////////////////////////////////// parser ends ////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////// WRITE FILE   //////////////////////////////////////////////////////
+
+void writeFile(binarySource bs, std::string filename)
+{
+	std::ofstream output(filename);
+	if (output)
+	{
+		for(int i = 0 ; i < bs.size() ; i++)
+		{
+			output<<bs[i]<<"\n";
+		}
+		output.close();
+	}
+	else
+		std::cout<<"err: failed to create file "<<std::endl;
+	exit(1);
+}
 
 
 
@@ -592,6 +681,6 @@ int main(int argc  , char *argv[])
 			auto b = readfile(argv[1]);
 			auto st = lex_analyse_source(b);
 			auto ts = parse_symbol_table(st , start_point);
-			print_vector_of_string(ts,8000);
+			writeFile(ts , "a.dat");
 		}
 }
